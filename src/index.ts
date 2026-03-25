@@ -48,6 +48,31 @@ function transformErrorMessage(message: string, host: string): string {
   return message;
 }
 
+/**
+ * Check if an error indicates the gateway process has crashed.
+ * The Sandbox SDK throws this when containerFetch/wsConnect is called
+ * but the target process is no longer listening.
+ */
+function isGatewayCrashedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.includes('is not listening');
+}
+
+/**
+ * Kill any existing gateway process so ensureMoltbotGateway() starts fresh.
+ */
+async function killExistingGateway(sandbox: Sandbox): Promise<void> {
+  const process = await findExistingMoltbotProcess(sandbox);
+  if (process) {
+    console.log('[PROXY] Killing crashed gateway process:', process.id);
+    try {
+      await process.kill();
+    } catch (e) {
+      console.log('[PROXY] Failed to kill process (may already be dead):', e);
+    }
+  }
+}
+
 export { Sandbox };
 
 /**
