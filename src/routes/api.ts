@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import { createAccessMiddleware } from '../auth';
-import { ensureGateway, findExistingGatewayProcess, waitForProcess } from '../gateway';
+import { ensureGateway, findExistingGatewayProcess, killGateway, waitForProcess } from '../gateway';
 import { createSnapshot, getLastBackupId, clearPersistenceCache } from '../persistence';
 
 // CLI commands can take 10-15 seconds to complete due to WebSocket connection overhead
@@ -245,60 +245,10 @@ adminApi.post('/gateway/restart', async (c) => {
   const sandbox = c.get('sandbox');
 
   try {
-    // Find and kill the existing gateway process
+    // Kill the gateway process (shared logic with crash retry)
     const existingProcess = await findExistingGatewayProcess(sandbox);
-
-    // Kill via the Process API first
-    if (existingProcess) {
-      console.log('[Restart] Killing via Process API:', existingProcess.id);
-      try {
-        await existingProcess.kill();
-      } catch {
-        // Ignore
-      }
-    }
-
-    // Force kill the gateway via exec — more reliable than Process.kill()
-    // because start-openclaw.sh execs into "openclaw" which forks
-    // "openclaw-gateway". Process.kill() only kills the tracked shell PID,
-    // but the forked child keeps port 18789. (Credit: dalexeenko #261)
-    //
-    // Use multiple strategies since we don't know what tools are available.
-    try {
-      const killResult = await sandbox.exec(
-        [
-          // Strategy 1: pgrep by exact name (most precise)
-          'kill -9 $(pgrep -x "openclaw-gateway" 2>/dev/null) $(pgrep -x "openclaw" 2>/dev/null) 2>/dev/null',
-          // Strategy 2: pkill by pattern (broader match)
-          'pkill -9 -f "openclaw" 2>/dev/null',
-          // Strategy 3: find by port (most reliable but needs ss/fuser)
-          'kill -9 $(ss -tlnp sport = :18789 2>/dev/null | grep -oP "pid=\\K[0-9]+") 2>/dev/null',
-          // Always succeed
-          'true',
-        ].join('; '),
-      );
-      console.log('[Restart] Kill result:', killResult.stdout?.trim(), killResult.stderr?.trim());
-    } catch (e) {
-      console.error('[Restart] Kill exec failed:', e);
-    }
-
-    // Clean up lock files that prevent restart
-    try {
-      await sandbox.exec(
-        'rm -f /tmp/openclaw-gateway.lock /root/.openclaw/gateway.lock /home/openclaw/.openclaw/gateway.lock 2>/dev/null; true',
-      );
-    } catch {
-      // Ignore
-    }
-
-    // Wait for process to fully die and verify
-    await new Promise((r) => setTimeout(r, 3000));
-    try {
-      const check = await sandbox.exec('ps aux | grep -v grep | grep openclaw || echo "ALL DEAD"');
-      console.log('[Restart] Surviving processes:', check.stdout?.trim());
-    } catch {
-      // Ignore
-    }
+    console.log('[Restart] Killing gateway, existing process:', existingProcess?.id ?? 'none');
+    await killGateway(sandbox);
 
     // Clear the restore flag so the next request re-restores from R2.
     // We intentionally do NOT start the gateway here — the next incoming

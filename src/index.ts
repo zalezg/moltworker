@@ -26,7 +26,7 @@ import { getSandbox, Sandbox, type SandboxOptions } from '@cloudflare/sandbox';
 import type { AppEnv, OpenClawEnv } from './types';
 import { GATEWAY_PORT } from './config';
 import { createAccessMiddleware } from './auth';
-import { ensureGateway, findExistingGatewayProcess } from './gateway';
+import { ensureGateway, findExistingGatewayProcess, killGateway } from './gateway';
 import { publicRoutes, api, adminUi, debug, cdp } from './routes';
 import { redactSensitiveParams } from './utils/logging';
 import { restoreIfNeeded, createSnapshot } from './persistence';
@@ -58,20 +58,7 @@ function isGatewayCrashedError(error: unknown): boolean {
   return error.message.includes('is not listening');
 }
 
-/**
- * Kill any existing gateway process so ensureGateway() starts fresh.
- */
-async function killExistingGateway(sandbox: Sandbox): Promise<void> {
-  const process = await findExistingGatewayProcess(sandbox);
-  if (process) {
-    console.log('[PROXY] Killing crashed gateway process:', process.id);
-    try {
-      await process.kill();
-    } catch (e) {
-      console.log('[PROXY] Failed to kill process (may already be dead):', e);
-    }
-  }
-}
+// killGateway is imported from './gateway' (shared with restart handler)
 
 export { Sandbox };
 
@@ -342,8 +329,26 @@ app.all('*', async (c) => {
       wsRequest = new Request(tokenUrl.toString(), request);
     }
 
-    // Get WebSocket connection to the container
-    const containerResponse = await sandbox.wsConnect(wsRequest, GATEWAY_PORT);
+    // Get WebSocket connection to the container (with retry on crash)
+    let containerResponse: Response;
+    try {
+      containerResponse = await sandbox.wsConnect(wsRequest, GATEWAY_PORT);
+    } catch (err) {
+      if (isGatewayCrashedError(err)) {
+        console.log('[WS] Gateway crashed, attempting restart and retry...');
+        await killGateway(sandbox);
+        await ensureGateway(sandbox, c.env);
+        try {
+          containerResponse = await sandbox.wsConnect(wsRequest, GATEWAY_PORT);
+        } catch (retryErr) {
+          console.error('[WS] Retry after restart also failed:', retryErr);
+          return new Response('Gateway crashed and recovery failed', { status: 503 });
+        }
+      } else {
+        console.error('[WS] WebSocket proxy error:', err);
+        return new Response('WebSocket proxy error', { status: 502 });
+      }
+    }
     console.log('[WS] wsConnect response status:', containerResponse.status);
 
     // Get the container-side WebSocket
@@ -472,7 +477,29 @@ app.all('*', async (c) => {
   }
 
   console.log('[HTTP] Proxying:', url.pathname + url.search);
-  const httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
+
+  let httpResponse: Response;
+  try {
+    httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
+  } catch (err) {
+    if (isGatewayCrashedError(err)) {
+      console.log('[HTTP] Gateway crashed, attempting restart and retry...');
+      await killGateway(sandbox);
+      await ensureGateway(sandbox, c.env);
+      try {
+        httpResponse = await sandbox.containerFetch(request, GATEWAY_PORT);
+      } catch (retryErr) {
+        console.error('[HTTP] Retry after restart also failed:', retryErr);
+        return c.json({ error: 'Gateway crashed and recovery failed' }, 503);
+      }
+    } else {
+      console.error('[HTTP] Proxy error:', err);
+      return c.json(
+        { error: 'Proxy error', message: err instanceof Error ? err.message : String(err) },
+        502,
+      );
+    }
+  }
   console.log('[HTTP] Response status:', httpResponse.status);
 
   // Add debug header to verify worker handled the request

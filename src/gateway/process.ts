@@ -4,6 +4,53 @@ import { GATEWAY_PORT, STARTUP_TIMEOUT_MS } from '../config';
 import { buildEnvVars } from './env';
 
 /**
+ * Force kill the gateway process and clean up lock files.
+ *
+ * start-openclaw.sh execs into "openclaw" which forks "openclaw-gateway".
+ * Process.kill() only kills the tracked PID, but the forked child keeps
+ * port 18789. We use multiple strategies to ensure everything is dead.
+ */
+export async function killGateway(sandbox: Sandbox): Promise<void> {
+  // Strategy 1: pgrep by exact name (most precise)
+  // Strategy 2: pkill by pattern (broader match)
+  // Strategy 3: ss to find PID by port (most reliable but needs ss)
+  try {
+    await sandbox.exec(
+      [
+        'kill -9 $(pgrep -x "openclaw-gateway" 2>/dev/null) $(pgrep -x "openclaw" 2>/dev/null) 2>/dev/null',
+        'pkill -9 -f "openclaw" 2>/dev/null',
+        `kill -9 $(ss -tlnp sport = :${GATEWAY_PORT} 2>/dev/null | grep -oP "pid=\\K[0-9]+") 2>/dev/null`,
+        'true',
+      ].join('; '),
+    );
+  } catch {
+    // Process may not exist or tools not available
+  }
+
+  // Also kill via the Process API
+  const process = await findExistingGatewayProcess(sandbox);
+  if (process) {
+    try {
+      await process.kill();
+    } catch {
+      // may already be dead
+    }
+  }
+
+  // Clean up lock files that prevent restart
+  try {
+    await sandbox.exec(
+      'rm -f /tmp/openclaw-gateway.lock /root/.openclaw/gateway.lock /home/openclaw/.openclaw/gateway.lock 2>/dev/null; true',
+    );
+  } catch {
+    // ignore
+  }
+
+  // Wait for process to fully die
+  await new Promise((r) => setTimeout(r, 2000));
+}
+
+/**
  * Check if the gateway port is already listening via a TCP probe.
  * Used as a safety net when listProcesses() fails to detect the gateway.
  */
