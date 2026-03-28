@@ -482,7 +482,29 @@ app.all('*', async (c) => {
   }
   console.log('[HTTP] Response status:', httpResponse.status);
 
-  // Add debug header to verify worker handled the request
+  // For HTML requests, verify we got actual content from the gateway.
+  // containerFetch can return a 200 with empty body if the gateway's
+  // HTTP handler hasn't fully initialized. Show the loading page instead
+  // of a blank page that the user would be stuck on forever.
+  if (acceptsHtml) {
+    const body = await httpResponse.text();
+    if (!body || body.length < 50) {
+      console.log(
+        `[HTTP] Empty/short response (${body.length} bytes) for HTML request, serving loading page`,
+      );
+      return c.html(loadingPageHtml);
+    }
+    const newHeaders = new Headers(httpResponse.headers);
+    newHeaders.set('X-Worker-Debug', 'proxy-to-gateway');
+    newHeaders.set('X-Debug-Path', url.pathname);
+    return new Response(body, {
+      status: httpResponse.status,
+      statusText: httpResponse.statusText,
+      headers: newHeaders,
+    });
+  }
+
+  // Non-HTML: pass through as-is
   const newHeaders = new Headers(httpResponse.headers);
   newHeaders.set('X-Worker-Debug', 'proxy-to-gateway');
   newHeaders.set('X-Debug-Path', url.pathname);
