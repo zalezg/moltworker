@@ -61,6 +61,7 @@
     {
       "binding": "BACKUP_BUCKET",
       "bucket_name": "moltbot-data","preview_bucket_name": "moltbot-data",
+"remote": true
     },
   ],
 
