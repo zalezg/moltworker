@@ -55,11 +55,13 @@
       "tag": "v1",
     },
   ],
-  // R2 bucket for persistent storage (moltbot data, conversations, etc.)
+  // R2 bucket for Sandbox SDK backup/restore (squashfs snapshots).
+  // The binding name MOLTBOT_BUCKET is required by @cloudflare/sandbox.
   "r2_buckets": [
     {
       "binding": "MOLTBOT_BUCKET",
-      "bucket_name": "openclaw-data","preview_bucket_name": "openclaw-data",
+      "bucket_name": "moltbot-data","preview_bucket_name": "moltbot-data",
+      "remote": true,
     },
   ],
 
